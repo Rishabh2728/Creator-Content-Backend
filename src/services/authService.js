@@ -40,7 +40,7 @@ export const sendOtp = async (email) => {
   await Otp.findOneAndUpdate(
     { email: normalizedEmail, isUsed: false },
     { email: normalizedEmail, otp: otpCode, expiresAt, isUsed: false },
-    { upsert: true, new: true, setDefaultsOnInsert: true }
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
   );
 
   await sendEmail({
@@ -80,7 +80,7 @@ export const verifyOtp = async (email, otp) => {
   await User.findOneAndUpdate(
     { email: normalizedEmail },
     { $set: { isVerified: true } },
-    { new: true }
+    { returnDocument: "after" }
   );
 
   return { success: true };
@@ -164,3 +164,4 @@ export default {
   registerUser,
   loginUser,
 };
+

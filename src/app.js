@@ -21,6 +21,10 @@ app.get("/health", (req, res) => {
 
 app.use("/api/auth", authRoutes);
 
+app.get("/api/test", (req, res) => {
+  res.json({ message: "Backend connected successfully" });
+});
+
 app.use((req, res) => {
   res.status(404).json({
     success: false,
@@ -36,10 +40,6 @@ app.use((err, req, res, next) => {
     success: false,
     message,
   });
-});
-
-app.get("/api/test", (req, res) => {
-  res.json({ message: "Backend connected successfully" });
 });
 
 export default app;
