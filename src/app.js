@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import authRoutes from "./routes/authRoutes.js";
+import assetRoutes from "./routes/assetRoutes.js";
 
 const app = express();
 
@@ -20,6 +21,7 @@ app.get("/health", (req, res) => {
 });
 
 app.use("/api/auth", authRoutes);
+app.use("/api/assets", assetRoutes);
 
 app.get("/api/test", (req, res) => {
   res.json({ message: "Backend connected successfully" });
