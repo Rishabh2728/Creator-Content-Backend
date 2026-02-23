@@ -13,7 +13,9 @@ const startServer = async () => {
   const PORT = process.env.PORT || 5000;
   const server = http.createServer(app);
 
-  const allowedOrigins = (process.env.CORS_ORIGIN || "http://localhost:5173")
+  const allowedOrigins = (
+    process.env.CORS_ORIGIN || "https://creator-connect-frontend.vercel.app"
+  )
     .split(",")
     .map((origin) => origin.trim())
     .filter(Boolean);
@@ -39,9 +41,9 @@ const startServer = async () => {
   const HOST = process.env.HOST || "0.0.0.0";
 
   server.listen(PORT, HOST, () => {
-  console.log(`Server running on http://${HOST}:${PORT}`);
-  console.log(`Socket.IO ready on http://${HOST}:${PORT}`);
-});
+    console.log(`Server running on http://${HOST}:${PORT}`);
+    console.log(`Socket.IO ready on http://${HOST}:${PORT}`);
+  });
 };
 
 startServer();
