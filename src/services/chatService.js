@@ -19,6 +19,44 @@ const buildParticipantsHash = (firstUserId, secondUserId) => {
   return [firstUserId.toString(), secondUserId.toString()].sort().join(":");
 };
 
+const findConversationByParticipants = async (firstUserId, secondUserId) => {
+  const participantsHash = buildParticipantsHash(firstUserId, secondUserId);
+  const conversations = await Conversation.find({
+    participants: { $all: [firstUserId, secondUserId] },
+  }).sort({ lastMessageAt: -1, updatedAt: -1, createdAt: -1 });
+
+  if (!conversations.length) {
+    return null;
+  }
+
+  const hashConversation = conversations.find(
+    (conversation) => conversation.participantsHash === participantsHash
+  );
+  const activeConversation = conversations.find(
+    (conversation) => conversation.lastMessageAt
+  );
+
+  let conversation = hashConversation || conversations[0];
+  if ((!conversation.lastMessageAt || conversation.lastMessage === "") && activeConversation) {
+    conversation = activeConversation;
+  }
+
+  // Backfill hash for older conversations so future reads stay fast and consistent.
+  if (conversation.participantsHash !== participantsHash) {
+    conversation.participantsHash = participantsHash;
+    try {
+      await conversation.save();
+    } catch (error) {
+      // Ignore duplicate hash errors caused by pre-existing duplicate conversations.
+      if (error?.code !== 11000) {
+        throw error;
+      }
+    }
+  }
+
+  return conversation;
+};
+
 const ensureReceiverExists = async (receiverId) => {
   const receiver = await User.findById(receiverId).select("_id name email");
   if (!receiver) {
@@ -29,8 +67,8 @@ const ensureReceiverExists = async (receiverId) => {
 
 const getOrCreateConversation = async (senderId, receiverId) => {
   const participantsHash = buildParticipantsHash(senderId, receiverId);
+  let conversation = await findConversationByParticipants(senderId, receiverId);
 
-  let conversation = await Conversation.findOne({ participantsHash });
   if (!conversation) {
     conversation = await Conversation.create({
       participants: [senderId, receiverId],
@@ -120,38 +158,49 @@ export const getMessagesWithUser = async ({
   const safeLimit = Math.min(Math.max(Number(limit) || DEFAULT_LIMIT, 1), MAX_LIMIT);
   const skip = (safePage - 1) * safeLimit;
 
-  const participantsHash = buildParticipantsHash(currentObjectId, otherObjectId);
+  const conversation = await findConversationByParticipants(
+    currentObjectId,
+    otherObjectId
+  );
+  const messageQuery = conversation
+    ? { conversationId: conversation._id }
+    : {
+        $or: [
+          { sender: currentObjectId, receiver: otherObjectId },
+          { sender: otherObjectId, receiver: currentObjectId },
+        ],
+      };
 
-  const conversation = await Conversation.findOne({ participantsHash });
-  if (!conversation) {
-    return {
-      conversationId: null,
-      messages: [],
-      pagination: {
-        page: safePage,
-        limit: safeLimit,
-        hasMore: false,
-      },
-    };
-  }
-
-  const messages = await Message.find({ conversationId: conversation._id })
+  const messages = await Message.find(messageQuery)
     .sort({ createdAt: -1 })
     .skip(skip)
     .limit(safeLimit)
     .populate("sender", "_id name email")
     .populate("receiver", "_id name email");
 
-  await Message.updateMany(
-    {
-      conversationId: conversation._id,
-      receiver: currentObjectId,
-      readBy: { $ne: currentObjectId },
-    },
-    {
-      $addToSet: { readBy: currentObjectId },
-    }
-  );
+  if (conversation) {
+    await Message.updateMany(
+      {
+        conversationId: conversation._id,
+        receiver: currentObjectId,
+        readBy: { $ne: currentObjectId },
+      },
+      {
+        $addToSet: { readBy: currentObjectId },
+      }
+    );
+  } else {
+    await Message.updateMany(
+      {
+        sender: otherObjectId,
+        receiver: currentObjectId,
+        readBy: { $ne: currentObjectId },
+      },
+      {
+        $addToSet: { readBy: currentObjectId },
+      }
+    );
+  }
 
   const normalizedMessages = messages
     .reverse()
@@ -177,7 +226,7 @@ export const getMessagesWithUser = async ({
     }));
 
   return {
-    conversationId: conversation._id,
+    conversationId: conversation?._id || normalizedMessages[0]?.conversationId || null,
     messages: normalizedMessages,
     pagination: {
       page: safePage,
