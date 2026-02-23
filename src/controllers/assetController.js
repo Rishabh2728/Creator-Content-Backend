@@ -7,13 +7,18 @@ const toAssetResponse = (asset, req) => {
     ? asset.fileUrl
     : `${req.protocol}://${req.get("host")}${asset.fileUrl}`;
 
+  const owner = asset.ownerId;
+  const normalizedOwnerId = owner?._id || owner || null;
+
   return {
     id: asset._id,
     title: asset.title,
     fileName: asset.fileName,
     mimeType: asset.mimeType,
     visibility: asset.visibility,
-    ownerName: asset.ownerId?.name || null,
+    ownerId: normalizedOwnerId ? normalizedOwnerId.toString() : null,
+    ownerName: owner?.name || null,
+    ownerEmail: owner?.email || null,
     createdAt: asset.createdAt,
     fileUrl,
   };
@@ -69,7 +74,7 @@ export const createAssetController = async (req, res, next) => {
 
     const populatedAsset = await Asset.findById(asset._id).populate(
       "ownerId",
-      "name"
+      "name email"
     );
 
     res.status(201).json({
@@ -86,7 +91,7 @@ export const getPublicAssetsController = async (req, res, next) => {
   try {
     const assets = await Asset.find({ visibility: "public" })
       .sort({ createdAt: -1 })
-      .populate("ownerId", "name");
+      .populate("ownerId", "name email");
 
     res.status(200).json({
       success: true,
@@ -102,7 +107,7 @@ export const getMyAssetsController = async (req, res, next) => {
   try {
     const assets = await Asset.find({ ownerId: req.user._id })
       .sort({ createdAt: -1 })
-      .populate("ownerId", "name");
+      .populate("ownerId", "name email");
 
     res.status(200).json({
       success: true,
