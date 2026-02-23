@@ -25,13 +25,23 @@ const startServer = async () => {
     },
   });
 
+  io.engine.on("connection_error", (err) => {
+    console.log("[socket][engine][connection_error]", {
+      code: err.code,
+      message: err.message,
+      context: err.context,
+    });
+  });
+
   setIO(io);
   setupChatSocket(io);
 
-  server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-    console.log(`Socket.IO ready on port ${PORT}`);
-  });
+  const HOST = process.env.HOST || "0.0.0.0";
+
+  server.listen(PORT, HOST, () => {
+  console.log(`Server running on http://${HOST}:${PORT}`);
+  console.log(`Socket.IO ready on http://${HOST}:${PORT}`);
+});
 };
 
 startServer();
