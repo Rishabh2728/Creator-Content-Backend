@@ -6,15 +6,18 @@ import app from "./src/app.js";
 import connectDB from "./src/config/db.js";
 import { setIO } from "./src/socket/io.js";
 import { setupChatSocket } from "./src/socket/chatSocket.js";
+import { syncCoinPlansCatalog } from "./src/services/coinPlanCatalogService.js";
 
 const startServer = async () => {
   await connectDB();
+  await syncCoinPlansCatalog();
 
   const PORT = process.env.PORT || 5000;
   const server = http.createServer(app);
 
   const allowedOrigins = (
-    process.env.CORS_ORIGIN || "https://creator-connect-frontend.vercel.app"
+    process.env.CORS_ORIGIN ||
+    "http://localhost:5173,http://localhost:3000,https://creator-connect-frontend.vercel.app"
   )
     .split(",")
     .map((origin) => origin.trim())

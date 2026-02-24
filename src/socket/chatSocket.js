@@ -71,13 +71,22 @@ export const setupChatSocket = (io) => {
           token,
           process.env.JWT_SECRET || "dev_jwt_secret_change_me"
         );
+        const tokenUserId =
+          decoded?.id || decoded?._id || decoded?.userId || decoded?.sub || null;
+        if (!tokenUserId) {
+          console.log("[socket][auth][rejected]", {
+            namespace: namespaceLabel,
+            reason: "token_user_id_missing",
+          });
+          return next(new Error("Unauthorized: invalid token"));
+        }
 
-        const user = await User.findById(decoded.id).select("_id name email role");
+        const user = await User.findById(tokenUserId).select("_id name email role");
         if (!user) {
           console.log("[socket][auth][rejected]", {
             namespace: namespaceLabel,
             reason: "user_not_found",
-            userId: decoded.id,
+            userId: tokenUserId,
           });
           return next(new Error("Unauthorized: user not found"));
         }
@@ -196,11 +205,12 @@ export const setupChatSocket = (io) => {
 
       socket.on("chat:send", async (payload = {}, ack) => {
         try {
-          const message = await chatService.sendMessage({
+          const result = await chatService.sendMessage({
             senderId: userId,
             receiverId: payload.receiverId,
             body: payload.body,
           });
+          const message = result.message;
 
           const senderRoom = `user:${message.sender.id.toString()}`;
           const receiverRoom = `user:${message.receiver.id.toString()}`;
@@ -209,7 +219,7 @@ export const setupChatSocket = (io) => {
           namespace.to(receiverRoom).emit("chat:message", message);
 
           if (typeof ack === "function") {
-            ack({ ok: true, message });
+            ack({ ok: true, data: result });
           }
         } catch (error) {
           if (typeof ack === "function") {

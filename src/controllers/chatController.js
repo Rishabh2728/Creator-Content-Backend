@@ -124,21 +124,21 @@ export const sendMessageController = async (req, res, next) => {
       throw new HttpError(400, "receiverId and body are required");
     }
 
-    const message = await chatService.sendMessage({
+    const result = await chatService.sendMessage({
       senderId: req.user._id,
       receiverId,
       body,
     });
 
     const io = getIO();
-    const receiverRoom = `user:${message.receiver.id.toString()}`;
+    const receiverRoom = `user:${result.message.receiver.id.toString()}`;
 
-    io.to(receiverRoom).emit("chat:message", message);
+    io.to(receiverRoom).emit("chat:message", result.message);
 
     res.status(201).json({
       success: true,
       message: "Message sent successfully",
-      data: message,
+      data: result,
     });
   } catch (error) {
     next(error);

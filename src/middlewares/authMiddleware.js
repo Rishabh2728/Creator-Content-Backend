@@ -16,9 +16,15 @@ const authMiddleware = async (req, res, next) => {
       process.env.JWT_SECRET || "dev_jwt_secret_change_me"
     );
 
-    const user = await User.findById(decoded.id).select("_id name email role");
+    const tokenUserId =
+      decoded?.id || decoded?._id || decoded?.userId || decoded?.sub || "";
+    if (!tokenUserId) {
+      throw new HttpError(401, "Invalid or expired token");
+    }
+
+    const user = await User.findById(tokenUserId).select("_id name email role");
     if (!user) {
-      throw new HttpError(401, "Invalid token user");
+      throw new HttpError(401, "Invalid or expired token");
     }
 
     req.user = user;

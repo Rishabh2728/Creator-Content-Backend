@@ -3,6 +3,10 @@ import User from "../models/user.js";
 import Conversation from "../models/conversation.js";
 import Message from "../models/message.js";
 import HttpError from "../utils/httpError.js";
+import {
+  debitCoinForMessageSend,
+  ensureWalletWithFreeGrant,
+} from "./coinWalletService.js";
 
 const DEFAULT_PAGE = 1;
 const DEFAULT_LIMIT = 20;
@@ -19,11 +23,17 @@ const buildParticipantsHash = (firstUserId, secondUserId) => {
   return [firstUserId.toString(), secondUserId.toString()].sort().join(":");
 };
 
-const findConversationByParticipants = async (firstUserId, secondUserId) => {
+const findConversationByParticipants = async (
+  firstUserId,
+  secondUserId,
+  session = null
+) => {
   const participantsHash = buildParticipantsHash(firstUserId, secondUserId);
   const conversations = await Conversation.find({
     participants: { $all: [firstUserId, secondUserId] },
-  }).sort({ lastMessageAt: -1, updatedAt: -1, createdAt: -1 });
+  })
+    .session(session)
+    .sort({ lastMessageAt: -1, updatedAt: -1, createdAt: -1 });
 
   if (!conversations.length) {
     return null;
@@ -45,7 +55,7 @@ const findConversationByParticipants = async (firstUserId, secondUserId) => {
   if (conversation.participantsHash !== participantsHash) {
     conversation.participantsHash = participantsHash;
     try {
-      await conversation.save();
+      await conversation.save({ session });
     } catch (error) {
       // Ignore duplicate hash errors caused by pre-existing duplicate conversations.
       if (error?.code !== 11000) {
@@ -57,23 +67,35 @@ const findConversationByParticipants = async (firstUserId, secondUserId) => {
   return conversation;
 };
 
-const ensureReceiverExists = async (receiverId) => {
-  const receiver = await User.findById(receiverId).select("_id name email");
+const ensureReceiverExists = async (receiverId, session = null) => {
+  const receiver = await User.findById(receiverId)
+    .session(session)
+    .select("_id name email");
   if (!receiver) {
     throw new HttpError(404, "Receiver user not found");
   }
   return receiver;
 };
 
-const getOrCreateConversation = async (senderId, receiverId) => {
+const getOrCreateConversation = async (senderId, receiverId, session = null) => {
   const participantsHash = buildParticipantsHash(senderId, receiverId);
-  let conversation = await findConversationByParticipants(senderId, receiverId);
+  let conversation = await findConversationByParticipants(
+    senderId,
+    receiverId,
+    session
+  );
 
   if (!conversation) {
-    conversation = await Conversation.create({
-      participants: [senderId, receiverId],
-      participantsHash,
-    });
+    const createdConversations = await Conversation.create(
+      [
+        {
+          participants: [senderId, receiverId],
+          participantsHash,
+        },
+      ],
+      { session }
+    );
+    conversation = createdConversations[0];
   }
 
   return conversation;
@@ -331,80 +353,121 @@ export const sendMessage = async ({ senderId, receiverId, body }) => {
     throw new HttpError(400, "Message body is required");
   }
 
-  const [sender, receiver] = await Promise.all([
-    User.findById(senderObjectId).select("_id name email"),
-    ensureReceiverExists(receiverObjectId),
-  ]);
+  const session = await mongoose.startSession();
+  try {
+    let payload = null;
+    await session.withTransaction(async () => {
+      const [sender, receiver] = await Promise.all([
+        User.findById(senderObjectId).session(session).select("_id name email"),
+        ensureReceiverExists(receiverObjectId, session),
+      ]);
 
-  if (!sender) {
-    throw new HttpError(401, "Sender user not found");
+      if (!sender) {
+        throw new HttpError(401, "Sender user not found");
+      }
+
+      await ensureWalletWithFreeGrant(senderObjectId, session);
+
+      const conversation = await getOrCreateConversation(
+        senderObjectId,
+        receiverObjectId,
+        session
+      );
+
+      // Guard against accidental duplicate sends (double click / dual submit paths)
+      const duplicateWindowStart = new Date(Date.now() - 3000);
+      const recentDuplicate = await Message.findOne({
+        conversationId: conversation._id,
+        sender: senderObjectId,
+        receiver: receiverObjectId,
+        body: trimmedBody,
+        createdAt: { $gte: duplicateWindowStart },
+      })
+        .session(session)
+        .sort({ createdAt: -1 })
+        .populate("sender", "_id name email")
+        .populate("receiver", "_id name email");
+
+      if (recentDuplicate) {
+        payload = {
+          message: {
+            id: recentDuplicate._id,
+            conversationId: recentDuplicate.conversationId,
+            body: recentDuplicate.body,
+            sender: {
+              id: recentDuplicate.sender._id,
+              name: recentDuplicate.sender.name,
+              email: recentDuplicate.sender.email,
+            },
+            receiver: {
+              id: recentDuplicate.receiver._id,
+              name: recentDuplicate.receiver.name,
+              email: recentDuplicate.receiver.email,
+            },
+            createdAt: recentDuplicate.createdAt,
+            updatedAt: recentDuplicate.updatedAt,
+          },
+          wallet: {
+            remainingCoins: (
+              await ensureWalletWithFreeGrant(senderObjectId, session)
+            ).remainingCoins,
+          },
+        };
+        return;
+      }
+
+      const walletAfterDebit = await debitCoinForMessageSend({
+        userId: senderObjectId,
+        session,
+      });
+
+      const createdMessages = await Message.create(
+        [
+          {
+            conversationId: conversation._id,
+            sender: senderObjectId,
+            receiver: receiverObjectId,
+            body: trimmedBody,
+            readBy: [senderObjectId],
+          },
+        ],
+        { session }
+      );
+      const message = createdMessages[0];
+
+      conversation.lastMessage = trimmedBody;
+      conversation.lastMessageAt = message.createdAt;
+      conversation.lastMessageSender = senderObjectId;
+      await conversation.save({ session });
+
+      payload = {
+        message: {
+          id: message._id,
+          conversationId: conversation._id,
+          body: message.body,
+          sender: {
+            id: sender._id,
+            name: sender.name,
+            email: sender.email,
+          },
+          receiver: {
+            id: receiver._id,
+            name: receiver.name,
+            email: receiver.email,
+          },
+          createdAt: message.createdAt,
+          updatedAt: message.updatedAt,
+        },
+        wallet: {
+          remainingCoins: walletAfterDebit.remainingCoins,
+        },
+      };
+    });
+
+    return payload;
+  } finally {
+    await session.endSession();
   }
-
-  const conversation = await getOrCreateConversation(senderObjectId, receiverObjectId);
-
-  // Guard against accidental duplicate sends (double click / dual submit paths)
-  const duplicateWindowStart = new Date(Date.now() - 3000);
-  const recentDuplicate = await Message.findOne({
-    conversationId: conversation._id,
-    sender: senderObjectId,
-    receiver: receiverObjectId,
-    body: trimmedBody,
-    createdAt: { $gte: duplicateWindowStart },
-  })
-    .sort({ createdAt: -1 })
-    .populate("sender", "_id name email")
-    .populate("receiver", "_id name email");
-
-  if (recentDuplicate) {
-    return {
-      id: recentDuplicate._id,
-      conversationId: recentDuplicate.conversationId,
-      body: recentDuplicate.body,
-      sender: {
-        id: recentDuplicate.sender._id,
-        name: recentDuplicate.sender.name,
-        email: recentDuplicate.sender.email,
-      },
-      receiver: {
-        id: recentDuplicate.receiver._id,
-        name: recentDuplicate.receiver.name,
-        email: recentDuplicate.receiver.email,
-      },
-      createdAt: recentDuplicate.createdAt,
-      updatedAt: recentDuplicate.updatedAt,
-    };
-  }
-
-  const message = await Message.create({
-    conversationId: conversation._id,
-    sender: senderObjectId,
-    receiver: receiverObjectId,
-    body: trimmedBody,
-    readBy: [senderObjectId],
-  });
-
-  conversation.lastMessage = trimmedBody;
-  conversation.lastMessageAt = message.createdAt;
-  conversation.lastMessageSender = senderObjectId;
-  await conversation.save();
-
-  return {
-    id: message._id,
-    conversationId: conversation._id,
-    body: message.body,
-    sender: {
-      id: sender._id,
-      name: sender.name,
-      email: sender.email,
-    },
-    receiver: {
-      id: receiver._id,
-      name: receiver.name,
-      email: receiver.email,
-    },
-    createdAt: message.createdAt,
-    updatedAt: message.updatedAt,
-  };
 };
 
 export default {
