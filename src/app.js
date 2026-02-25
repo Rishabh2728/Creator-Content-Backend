@@ -5,6 +5,7 @@ import assetRoutes from "./routes/assetRoutes.js";
 import chatRoutes from "./routes/chatRoutes.js";
 import coinsRoutes from "./routes/coinsRoutes.js";
 import paymentsRoutes from "./routes/paymentsRoutes.js";
+import webhookRoutes from "./routes/webhookRoutes.js";
 import { syncCoinPlansCatalog } from "./services/coinPlanCatalogService.js";
 import authMiddleware from "./middlewares/authMiddleware.js";
 import { getCoinWalletController } from "./controllers/coinsController.js";
@@ -29,6 +30,10 @@ app.use(cors({
   origin: allowedOrigins,
   credentials: true
 }));
+
+// Webhooks need raw body, so mount before express.json().
+app.use("/api/webhooks", webhookRoutes);
+app.use("/webhooks", webhookRoutes);
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));

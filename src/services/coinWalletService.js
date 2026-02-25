@@ -89,7 +89,7 @@ export const debitCoinForMessageSend = async ({
         totalCoinsUsed: MESSAGE_COST_COINS,
       },
     },
-    { new: true, ...normalizeSession(session) }
+    { returnDocument: "after", ...normalizeSession(session) }
   );
 
   if (!wallet) {
@@ -140,7 +140,7 @@ export const creditCoinsForPlanPurchase = async ({
         totalCoinsPurchased: totalCoins,
       },
     },
-    { new: true, ...normalizeSession(session) }
+    { returnDocument: "after", ...normalizeSession(session) }
   );
 
   if (!wallet) {
@@ -183,4 +183,3 @@ export default {
   creditCoinsForPlanPurchase,
   toWalletResponse,
 };
-

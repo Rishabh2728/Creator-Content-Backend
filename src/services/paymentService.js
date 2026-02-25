@@ -37,6 +37,62 @@ const validateAndBuildSignature = (orderId, paymentId) => {
     .digest("hex");
 };
 
+const getWebhookSecret = () => {
+  const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET?.trim();
+  if (!webhookSecret) {
+    throw new HttpError(
+      500,
+      "Razorpay webhook secret missing. Set RAZORPAY_WEBHOOK_SECRET."
+    );
+  }
+  return webhookSecret;
+};
+
+export const parseWebhookPayload = (rawBody) => {
+  try {
+    if (Buffer.isBuffer(rawBody)) {
+      return JSON.parse(rawBody.toString("utf8"));
+    }
+    if (typeof rawBody === "string") {
+      return JSON.parse(rawBody);
+    }
+    if (rawBody && typeof rawBody === "object") {
+      return rawBody;
+    }
+    throw new Error("Invalid webhook payload");
+  } catch {
+    throw new HttpError(400, "Invalid webhook payload");
+  }
+};
+
+export const verifyRazorpayWebhookSignature = (rawBody, signature) => {
+  if (!signature) {
+    throw new HttpError(400, "Missing x-razorpay-signature header");
+  }
+
+  const secret = getWebhookSecret();
+  const payloadString = Buffer.isBuffer(rawBody)
+    ? rawBody.toString("utf8")
+    : typeof rawBody === "string"
+      ? rawBody
+      : JSON.stringify(rawBody || {});
+
+  const expected = crypto
+    .createHmac("sha256", secret)
+    .update(payloadString)
+    .digest("hex");
+
+  const providedBuffer = Buffer.from(String(signature));
+  const expectedBuffer = Buffer.from(String(expected));
+  const valid =
+    providedBuffer.length === expectedBuffer.length &&
+    crypto.timingSafeEqual(providedBuffer, expectedBuffer);
+
+  if (!valid) {
+    throw new HttpError(400, "Invalid webhook signature");
+  }
+};
+
 export const createRazorpayOrder = async ({ userId, planId }) => {
   const plan = getCoinPlan(planId);
   const razorpay = getRazorpayClient();
@@ -203,7 +259,106 @@ export const verifyRazorpayAndCreditCoins = async ({
   }
 };
 
+const shouldProcessCreditEvent = (eventName) =>
+  eventName === "payment.captured" || eventName === "order.paid";
+
+export const processRazorpayWebhookEvent = async (payload) => {
+  const event = payload?.event || "";
+  const paymentEntity = payload?.payload?.payment?.entity || {};
+  const orderEntity = payload?.payload?.order?.entity || {};
+
+  const razorpayPaymentId = paymentEntity?.id || null;
+  const razorpayOrderId = paymentEntity?.order_id || orderEntity?.id || null;
+  const paymentSignature =
+    payload?.payload?.payment?.signature ||
+    payload?.payload?.payment?.entity?.signature ||
+    null;
+
+  if (!razorpayOrderId) {
+    throw new HttpError(400, "Webhook missing order id");
+  }
+
+  const paymentRecord = await PaymentTransaction.findOne({
+    razorpayOrderId,
+  });
+  if (!paymentRecord) {
+    return { ignored: true, reason: "payment_order_not_found", event };
+  }
+
+  if (!shouldProcessCreditEvent(event)) {
+    return { ignored: true, reason: "event_not_supported", event };
+  }
+
+  const session = await mongoose.startSession();
+  try {
+    let walletResult = null;
+    await session.withTransaction(async () => {
+      const payment = await PaymentTransaction.findById(paymentRecord._id, null, {
+        session,
+      });
+      if (!payment) {
+        throw new HttpError(404, "Payment order not found");
+      }
+
+      if (payment.coinsCredited) {
+        const wallet = await ensureWalletWithFreeGrant(payment.userId, session);
+        walletResult = wallet;
+        return;
+      }
+
+      const plan = getCoinPlan(payment.planId);
+
+      const updateResult = await PaymentTransaction.updateOne(
+        { _id: payment._id, coinsCredited: false },
+        {
+          $set: {
+            status: "VERIFIED",
+            coinsCredited: true,
+            razorpayPaymentId: razorpayPaymentId || payment.razorpayPaymentId,
+            razorpaySignature: paymentSignature || payment.razorpaySignature,
+          },
+        },
+        { session }
+      );
+
+      if (updateResult.modifiedCount === 0) {
+        const wallet = await ensureWalletWithFreeGrant(payment.userId, session);
+        walletResult = wallet;
+        return;
+      }
+
+      walletResult = await creditCoinsForPlanPurchase({
+        userId: payment.userId,
+        plan,
+        orderId: payment.razorpayOrderId,
+        paymentId: razorpayPaymentId || payment.razorpayPaymentId,
+        session,
+      });
+    });
+
+    return {
+      ignored: false,
+      event,
+      orderId: razorpayOrderId,
+      paymentId: razorpayPaymentId,
+      wallet: {
+        remainingCoins: walletResult?.remainingCoins || 0,
+      },
+    };
+  } catch (error) {
+    if (error?.code === 11000) {
+      throw new HttpError(409, "Duplicate payment webhook detected");
+    }
+    throw error;
+  } finally {
+    await session.endSession();
+  }
+};
+
 export default {
   createRazorpayOrder,
   verifyRazorpayAndCreditCoins,
+  parseWebhookPayload,
+  verifyRazorpayWebhookSignature,
+  processRazorpayWebhookEvent,
 };
